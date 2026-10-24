@@ -13,7 +13,7 @@ import soundfile as sf
 import yaml
 from tqdm import tqdm
 
-from .audio import preprocess, silence_stats
+from .audio import load_mono_resampled, peak_dbfs, silence_stats
 
 MANIFEST_COLUMNS = [
     "path",
@@ -25,9 +25,12 @@ MANIFEST_COLUMNS = [
     "duration",
     "sample_rate",
     "rms_dbfs",
+    "peak_dbfs",
     "leading_silence_s",
     "trailing_silence_s",
 ]
+
+MANIFEST_SAMPLE_SEED = 42
 
 
 def load_config(config_path: str | Path = "config.yaml") -> dict[str, Path]:
@@ -215,14 +218,15 @@ def inspect_datasets(config_path: str | Path = "config.yaml") -> None:
 def _feature_row(item: tuple[str, str]) -> dict[str, object]:
     path, file_id = item
     info = sf.info(path)
-    processed = preprocess(path)
-    rms_dbfs, leading_s, trailing_s = silence_stats(processed.waveform)
+    raw_waveform, _ = load_mono_resampled(path)
+    rms_dbfs, leading_s, trailing_s = silence_stats(raw_waveform)
     return {
         "path": path,
         "file_id": file_id,
         "duration": float(info.duration),
         "sample_rate": int(info.samplerate),
         "rms_dbfs": rms_dbfs,
+        "peak_dbfs": peak_dbfs(raw_waveform),
         "leading_silence_s": leading_s,
         "trailing_silence_s": trailing_s,
     }
@@ -245,7 +249,11 @@ def _load_cache(cache_path: Path) -> pd.DataFrame:
 def _feature_rows(rows: pd.DataFrame, cache_path: Path, workers: int | None = None) -> pd.DataFrame:
     cache = _load_cache(cache_path)
     cached: dict[str, dict[str, object]] = {}
-    if not cache.empty and {"path", "size", "mtime_ns"}.issubset(cache.columns):
+    cache_columns = {
+        "path", "size", "mtime_ns", "duration", "sample_rate", "rms_dbfs", "peak_dbfs",
+        "leading_silence_s", "trailing_silence_s",
+    }
+    if not cache.empty and cache_columns.issubset(cache.columns):
         for _, row in cache.iterrows():
             cached[str(row["path"])] = row.to_dict()
 
@@ -284,9 +292,39 @@ def _feature_rows(rows: pd.DataFrame, cache_path: Path, workers: int | None = No
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(cache_rows).to_csv(cache_path, index=False)
     enriched = rows.copy()
-    for column in ("duration", "sample_rate", "rms_dbfs", "leading_silence_s", "trailing_silence_s"):
+    for column in ("duration", "sample_rate", "rms_dbfs", "peak_dbfs", "leading_silence_s", "trailing_silence_s"):
         enriched[column] = enriched["path"].map(lambda path: feature_by_path[str(path)][column])
     return enriched
+
+
+def _sample_rows(rows: pd.DataFrame, limit: int | None, seed: int = MANIFEST_SAMPLE_SEED) -> pd.DataFrame:
+    """Take a reproducible label-stratified random sample when a limit is set."""
+    if limit is None or limit >= len(rows):
+        return rows
+    if limit < 0:
+        raise ValueError("limit must be non-negative")
+    if limit == 0 or rows.empty:
+        return rows.iloc[:0].copy()
+    if "label" not in rows or rows["label"].nunique(dropna=True) <= 1:
+        return rows.sample(n=limit, random_state=seed)
+
+    groups = {label: group for label, group in rows.groupby("label", dropna=False, sort=True)}
+    if limit < len(groups):
+        return rows.sample(n=limit, random_state=seed)
+
+    total = len(rows)
+    quotas = {label: max(1, int(len(group) * limit / total)) for label, group in groups.items()}
+    while sum(quotas.values()) > limit:
+        candidates = [label for label, quota in quotas.items() if quota > 1]
+        label = max(candidates, key=lambda value: (quotas[value], str(value)))
+        quotas[label] -= 1
+    while sum(quotas.values()) < limit:
+        candidates = [label for label, group in groups.items() if quotas[label] < len(group)]
+        label = max(candidates, key=lambda value: (len(groups[value]) * limit / total - quotas[value], str(value)))
+        quotas[label] += 1
+
+    sampled = [group.sample(n=quotas[label], random_state=seed + index) for index, (label, group) in enumerate(groups.items())]
+    return pd.concat(sampled, ignore_index=True).sample(frac=1.0, random_state=seed).reset_index(drop=True)
 
 
 def _write_manifest(rows: pd.DataFrame, output_path: Path) -> None:
@@ -307,14 +345,12 @@ def build_manifests(config_path: str | Path = "config.yaml", output_dir: str | P
     all_rows: dict[str, pd.DataFrame] = {}
     for split, protocol in protocol_paths.items():
         parsed = parse_asvspoof_protocol(protocol.read_text(encoding="utf-8", errors="replace"), split, asv_root)
-        if limit is not None:
-            parsed = parsed.head(limit)
+        parsed = _sample_rows(parsed, limit)
         all_rows[split] = parsed
 
     meta = _find_meta_csv(itw_root)
     itw_rows = parse_itw_metadata(meta.read_text(encoding="utf-8", errors="replace"), itw_root)
-    if limit is not None:
-        itw_rows = itw_rows.head(limit)
+    itw_rows = _sample_rows(itw_rows, limit)
     all_rows["itw_test"] = itw_rows
 
     combined = pd.concat(all_rows.values(), ignore_index=True)

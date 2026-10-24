@@ -17,7 +17,11 @@ MAX_GAIN_DB = 20.0            # Prevent near-silent audio from being amplified e
 NEAR_SILENT_DBFS = -60.0      # Below this, leave gain at 1.0 and warn.
 SILENCE_THRESHOLD_DBFS = -50.0  # Fixed frame-RMS threshold used by silence_stats().
 SILENCE_FRAME_S = 0.020       # 20 ms energy frames for leading/trailing silence.
-CLIP_THRESHOLD = 0.99
+TRIM_RELATIVE_DB = 35.0        # Silence is this far below the loudest frame RMS.
+TRIM_MARGIN_S = 0.050          # Keep this much audio around detected speech.
+TRIM_MIN_DURATION_S = 1.0      # Never trim a clip below this duration.
+CLIP_THRESHOLD = 0.999         # Per-sample clipping threshold.
+CLIP_FRACTION_THRESHOLD = 0.001  # Warn only when more than 0.1% samples clip.
 
 ArrayLike = Union[np.ndarray, list[float], tuple[float, ...]]
 
@@ -44,7 +48,12 @@ def _as_mono(array: np.ndarray) -> np.ndarray:
     if array.ndim == 1:
         return array
     if array.ndim != 2:
-        raise ValueError("audio array must be 1D or 2D (samples, channels)")
+        raise ValueError("audio array must be 1D or 2D audio")
+    # soundfile uses (samples, channels); librosa with mono=False uses
+    # (channels, samples). A small leading dimension is the reliable signal
+    # for the latter layout in ordinary audio arrays.
+    if array.shape[0] <= 8 and array.shape[1] > array.shape[0]:
+        return np.mean(array, axis=0)
     return np.mean(array, axis=1)
 
 
@@ -57,9 +66,60 @@ def _load_audio(path_or_array: Union[str, Path, ArrayLike], sr: int | None) -> t
     return _as_mono(np.asarray(path_or_array, dtype=np.float32)), int(sr)
 
 
-def preprocess(path_or_array: Union[str, Path, ArrayLike], sr: int | None = None) -> PreprocessedAudio:
-    """Load, sanitize, resample, mono-mix, and RMS-normalize an audio clip."""
+def load_mono_resampled(path_or_array: Union[str, Path, ArrayLike], sr: int | None = None) -> tuple[np.ndarray, int]:
+    """Return sanitized mono audio resampled to TARGET_SR, before normalization."""
     waveform, original_sr = _load_audio(path_or_array, sr)
+    waveform = np.nan_to_num(waveform, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32, copy=False)
+    if waveform.size and original_sr != TARGET_SR:
+        waveform = librosa.resample(waveform, orig_sr=original_sr, target_sr=TARGET_SR).astype(np.float32)
+    return waveform, original_sr
+
+
+def _trim_silence(waveform: np.ndarray) -> np.ndarray:
+    """Trim relative silence while preserving a margin and a one-second minimum."""
+    minimum_samples = int(round(TRIM_MIN_DURATION_S * TARGET_SR))
+    if waveform.size < minimum_samples:
+        return waveform
+
+    frame = max(1, int(round(SILENCE_FRAME_S * TARGET_SR)))
+    frame_count = int(np.ceil(len(waveform) / frame))
+    frame_rms = np.array(
+        [
+            np.sqrt(
+                np.mean(
+                    np.square(waveform[i * frame : min((i + 1) * frame, len(waveform))], dtype=np.float64)
+                )
+            )
+            for i in range(frame_count)
+        ],
+        dtype=np.float64,
+    )
+    loudest = float(np.max(frame_rms)) if frame_rms.size else 0.0
+    if loudest <= 0.0 or not np.isfinite(loudest):
+        return waveform
+
+    threshold = loudest * (10.0 ** (-TRIM_RELATIVE_DB / 20.0))
+    non_silent = frame_rms >= threshold
+    if not np.any(non_silent):
+        return waveform
+
+    first = int(np.flatnonzero(non_silent)[0]) * frame
+    last = min(len(waveform), (int(np.flatnonzero(non_silent)[-1]) + 1) * frame)
+    margin = int(round(TRIM_MARGIN_S * TARGET_SR))
+    start = max(0, first - margin)
+    end = min(len(waveform), last + margin)
+    if end - start < minimum_samples:
+        return waveform
+    return waveform[start:end]
+
+
+def preprocess(
+    path_or_array: Union[str, Path, ArrayLike],
+    sr: int | None = None,
+    trim_silence: bool = False,
+) -> PreprocessedAudio:
+    """Load, sanitize, resample, mono-mix, and RMS-normalize an audio clip."""
+    waveform, original_sr = load_mono_resampled(path_or_array, sr)
     original_duration_s = float(len(waveform) / original_sr) if original_sr else 0.0
     warnings: list[str] = []
 
@@ -76,15 +136,11 @@ def preprocess(path_or_array: Union[str, Path, ArrayLike], sr: int | None = None
         warnings.append("near_silent")
 
     clipped_fraction = float(np.mean(np.abs(waveform) >= CLIP_THRESHOLD))
-    if clipped_fraction > 0.0:
+    if clipped_fraction > CLIP_FRACTION_THRESHOLD:
         warnings.append("clipped")
 
-    if original_sr != TARGET_SR:
-        waveform = librosa.resample(waveform, orig_sr=original_sr, target_sr=TARGET_SR).astype(np.float32)
-
-    if waveform.size == 0:
-        warnings.append("empty")
-        return PreprocessedAudio(np.zeros(0, dtype=np.float32), original_duration_s, original_sr, warnings)
+    if trim_silence:
+        waveform = _trim_silence(waveform)
 
     rms = float(np.sqrt(np.mean(np.square(waveform, dtype=np.float64))))
     rms_dbfs = _dbfs(rms)
@@ -170,3 +226,11 @@ def silence_stats(wave: np.ndarray) -> tuple[float, float, float]:
     leading_s = min(float(leading_frames * frame / TARGET_SR), len(wave) / TARGET_SR)
     trailing_s = min(float(trailing_frames * frame / TARGET_SR), len(wave) / TARGET_SR)
     return _dbfs(rms), leading_s, trailing_s
+
+
+def peak_dbfs(wave: np.ndarray) -> float:
+    """Return peak absolute amplitude in dBFS for an already prepared waveform."""
+    wave = np.nan_to_num(np.asarray(wave, dtype=np.float32).reshape(-1), nan=0.0, posinf=0.0, neginf=0.0)
+    if wave.size == 0:
+        return float("-inf")
+    return _dbfs(float(np.max(np.abs(wave))))

@@ -30,7 +30,7 @@ No dataset is downloaded by this repository. The paths in `config.yaml` are plac
 
 Constants are defined at the top of `src/audio.py`: target sample rate `16000`, target RMS `-20 dBFS`, maximum gain `20 dB`, near-silence threshold `-60 dBFS`, clipping threshold `0.99`, and silence-statistics threshold `-50 dBFS` over 20 ms RMS frames.
 
-`silence_stats()` returns RMS dBFS plus leading/trailing durations measured using that fixed 20 ms frame-RMS threshold. Manifest feature values are computed after the shared preprocessing step so the feature extraction path is identical to later inference.
+`silence_stats()` returns RMS dBFS plus leading/trailing durations measured using that fixed 20 ms frame-RMS threshold. Manifest `rms_dbfs`, `peak_dbfs`, and silence values are computed from sanitized mono, 16 kHz audio **before RMS normalization**, preserving original loudness differences for later ablations. The `--limit` smoke-test option uses a reproducible seed (`42`) and label-stratified random sampling where possible.
 
 ## Development checks with synthetic data
 

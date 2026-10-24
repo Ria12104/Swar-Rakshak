@@ -1,0 +1,13 @@
+name: cnn_baseline
+seed: 42
+train_manifest: manifests/train.csv
+dev_manifest: manifests/dev.csv
+runs_dir: runs
+epochs: 20
+patience: 5
+batch_size: 16
+num_workers: 0
+learning_rate: 0.001
+weight_decay: 0.0001
+trim_silence: false
+device: auto

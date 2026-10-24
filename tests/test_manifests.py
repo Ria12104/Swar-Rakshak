@@ -4,16 +4,18 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 import soundfile as sf
 
-from src.build_manifests import build_manifests, parse_asvspoof_protocol, parse_itw_metadata
+from src.audio import silence_stats, preprocess
+from src.build_manifests import _sample_rows, build_manifests, parse_asvspoof_protocol, parse_itw_metadata
 from src.validate_manifests import validate_manifests
 
 
-def _write_audio(path: Path, sample_rate: int = 8_000) -> None:
+def _write_audio(path: Path, sample_rate: int = 8_000, amplitude: float = 0.2) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     t = np.arange(sample_rate, dtype=np.float32) / sample_rate
-    sf.write(path, 0.2 * np.sin(2 * np.pi * 220 * t), sample_rate)
+    sf.write(path, amplitude * np.sin(2 * np.pi * 220 * t), sample_rate)
 
 
 def test_parsers_are_pure_and_tolerant() -> None:
@@ -38,8 +40,9 @@ def test_fake_tree_build_and_validate_end_to_end(tmp_path: Path) -> None:
     }
     for split, rows in split_rows.items():
         flac_dir = asv_root / f"ASVspoof2019_LA_{split}" / "flac"
-        for speaker, file_id, attack, label in rows:
-            _write_audio(flac_dir / f"{file_id}.flac")
+        for index, (speaker, file_id, attack, label) in enumerate(rows):
+            amplitude = 0.05 if split == "train" and index == 0 else 0.4 if split == "train" else 0.2
+            _write_audio(flac_dir / f"{file_id}.flac", amplitude=amplitude)
         protocol = "\n".join(f"{speaker} {file_id} - {attack} {label}" for speaker, file_id, attack, label in rows)
         (protocol_root / f"ASVspoof2019.LA.cm.{split}.txt").write_text(protocol + "\n", encoding="utf-8")
 
@@ -61,8 +64,24 @@ def test_fake_tree_build_and_validate_end_to_end(tmp_path: Path) -> None:
         frame = pd.read_csv(output / f"{name}.csv")
         assert list(frame.columns) == [
             "path", "label", "dataset", "split", "speaker_id", "attack_id", "duration",
-            "sample_rate", "rms_dbfs", "leading_silence_s", "trailing_silence_s",
+            "sample_rate", "rms_dbfs", "peak_dbfs", "leading_silence_s", "trailing_silence_s",
         ]
         assert len(frame) == 2
-        assert frame["path"].map(Path).map(Path.exists).all()
+        assert bool(frame["path"].map(lambda value: Path(str(value)).exists()).all())
+    train = pd.read_csv(output / "train.csv")
+    assert train["rms_dbfs"].nunique() == 2
+    quiet = preprocess(train.loc[train["rms_dbfs"].idxmin(), "path"])
+    loud = preprocess(train.loc[train["rms_dbfs"].idxmax(), "path"])
+    quiet_rms, _, _ = silence_stats(quiet.waveform)
+    loud_rms, _, _ = silence_stats(loud.waveform)
+    assert quiet_rms == pytest.approx(loud_rms, abs=0.1)
     assert validate_manifests(output)
+
+
+def test_limit_is_seeded_and_label_stratified() -> None:
+    rows = pd.DataFrame({"path": [f"{i}.wav" for i in range(10)], "label": [0] * 7 + [1] * 3})
+    first = _sample_rows(rows, 6, seed=123)
+    second = _sample_rows(rows, 6, seed=123)
+    assert first.equals(second)
+    assert len(first) == 6
+    assert first["label"].value_counts().to_dict() == {0: 4, 1: 2}

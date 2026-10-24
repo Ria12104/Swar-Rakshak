@@ -38,6 +38,13 @@ def validate_manifests(manifests_dir: str | Path = "manifests") -> bool:
     combined = pd.concat(all_frames, ignore_index=True) if all_frames else pd.DataFrame(columns=MANIFEST_COLUMNS)
     required_without_nullable_attack = [column for column in MANIFEST_COLUMNS if column != "attack_id"]
 
+    missing_columns = {
+        name: [column for column in MANIFEST_COLUMNS if column not in frame.columns]
+        for name, frame in frames.items()
+        if not frame.empty and any(column not in frame.columns for column in MANIFEST_COLUMNS)
+    }
+    check("required columns present", not missing_columns, str(missing_columns))
+
     missing_paths = [str(path) for path in combined.get("path", pd.Series(dtype=str)).dropna() if not Path(str(path)).exists()]
     check("every path exists", not missing_paths, ", ".join(missing_paths[:3]))
 

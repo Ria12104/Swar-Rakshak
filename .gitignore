@@ -2,3 +2,23 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .feature_cache.csv
+
+# Local environments and generated artifacts
+.venv/
+data/
+runs/
+logs/
+node_modules/
+dist/
+*.pt
+*.pth
+manifests/*.csv
+
+# Local secrets and tunnel credentials
+.env
+.env.*
+*.secret
+*.token
+*.pem
+ngrok*.yml
+ngrok*.yaml
