@@ -22,3 +22,7 @@ manifests/*.csv
 *.pem
 ngrok*.yml
 ngrok*.yaml
+
+# Local source archives
+swar-code.zip
+swar_code.zip

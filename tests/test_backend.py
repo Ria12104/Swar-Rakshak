@@ -9,7 +9,7 @@ import pytest
 import soundfile as sf
 from fastapi.testclient import TestClient
 
-from backend.app import BackendSettings, Thresholds, create_app, verdict_for_score
+from backend.app import BackendSettings, Thresholds, _load_thresholds, create_app, verdict_for_score
 
 
 class FixtureModel:
@@ -63,6 +63,22 @@ def test_health_has_model_and_thresholds() -> None:
     assert body["model_version"] == "fixture-random-cnn"
     assert body["thresholds"] == {"uncertain_low": 0.4, "synthetic_high": 0.7}
     assert body["thresholds_placeholder"] is False
+
+
+def test_probability_threshold_file_matches_sigmoid_model_space(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    model_path = tmp_path / "cnn_full" / "best.pt"
+    model_path.parent.mkdir()
+    (model_path.parent / "thresholds.json").write_text(
+        json.dumps({"uncertain_low": 0.123, "synthetic_high": 0.987}),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("UNCERTAIN_LOW", raising=False)
+    monkeypatch.delenv("SYNTHETIC_HIGH", raising=False)
+    monkeypatch.delenv("THRESHOLDS_PATH", raising=False)
+    thresholds = _load_thresholds(model_path)
+    assert thresholds.placeholder is False
+    assert thresholds.uncertain_low == pytest.approx(0.123)
+    assert thresholds.synthetic_high == pytest.approx(0.987)
 
 
 def test_predict_returns_contract_and_original_format() -> None:
