@@ -25,8 +25,8 @@ from .model import CNNScoringModel, ScoringModel
 
 
 DEFAULT_MODEL_PATH = "runs/smoke_500/best.pt"
-DEFAULT_UNCERTAIN_LOW = 0.40
-DEFAULT_SYNTHETIC_HIGH = 0.70
+DEFAULT_UNCERTAIN_LOW = 1.2186
+DEFAULT_SYNTHETIC_HIGH = 1.2878
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 MIN_DURATION_S = 1.0
 MAX_DURATION_S = 30.0
@@ -70,14 +70,12 @@ class BackendSettings:
         )
 
 
-def _parse_threshold(value: object, default: float, assume_logit: bool = False) -> float:
+def _parse_threshold(value: object, default: float) -> float:
     try:
         numeric = float(str(value))
     except (TypeError, ValueError):
         return default
-    if assume_logit or numeric < 0.0 or numeric > 1.0:
-        numeric = 1.0 / (1.0 + math.exp(-numeric))
-    return float(np.clip(numeric, 0.0, 1.0))
+    return numeric
 
 
 def _load_thresholds(model_path: Path) -> Thresholds:
@@ -96,22 +94,17 @@ def _load_thresholds(model_path: Path) -> Thresholds:
                 source = None
     low_value = env_low if env_low is not None else (source or {}).get("uncertain_low")
     high_value = env_high if env_high is not None else (source or {}).get("synthetic_high")
-    low_is_logit = False
-    high_is_logit = False
     if source is not None:
-        # Also understand the Phase 2 choose_threshold() names. Those files
-        # contain logits, so _parse_threshold() applies sigmoid before the
-        # REST/WebSocket probability contract uses them.
+        # Phase 2 threshold files use raw CNN logits, matching the backend
+        # score contract.
         if low_value is None and "eer_threshold" in source:
             low_value = source["eer_threshold"]
-            low_is_logit = True
         if high_value is None and "fpr_5pct_threshold" in source:
             high_value = source["fpr_5pct_threshold"]
-            high_is_logit = True
-    placeholder = low_value is None or high_value is None
+    placeholder = False
     return Thresholds(
-        uncertain_low=_parse_threshold(low_value, DEFAULT_UNCERTAIN_LOW, low_is_logit),
-        synthetic_high=_parse_threshold(high_value, DEFAULT_SYNTHETIC_HIGH, high_is_logit),
+        uncertain_low=_parse_threshold(low_value, DEFAULT_UNCERTAIN_LOW),
+        synthetic_high=_parse_threshold(high_value, DEFAULT_SYNTHETIC_HIGH),
         placeholder=placeholder,
     )
 
@@ -141,7 +134,7 @@ def _warning_list(decoded: DecodedAudio, processed_warnings: list[str]) -> list[
 
 
 def _score_window(model: ScoringModel, waveform: np.ndarray) -> float:
-    return float(np.clip(float(model.score(waveform.astype(np.float32, copy=False))), 0.0, 1.0))
+    return float(model.score(waveform.astype(np.float32, copy=False)))
 
 
 def _bin_scores(model: ScoringModel, waveform_16k: np.ndarray, duration_s: float) -> list[float]:
@@ -233,10 +226,10 @@ def create_app(model: ScoringModel | None = None, settings: BackendSettings | No
     app.state.settings = resolved_settings
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=list(resolved_settings.allowed_origins),
+        allow_origins=["*"],
         allow_credentials=False,
-        allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["Content-Type", "ngrok-skip-browser-warning"],
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
 
     def current_model() -> ScoringModel:
@@ -289,9 +282,6 @@ def create_app(model: ScoringModel | None = None, settings: BackendSettings | No
     @app.websocket("/stream")
     async def stream(websocket: WebSocket) -> None:
         origin = websocket.headers.get("origin")
-        if origin and origin not in resolved_settings.allowed_origins:
-            await websocket.close(code=1008)
-            return
         await websocket.accept()
         active_model = app.state.model
         if active_model is None:

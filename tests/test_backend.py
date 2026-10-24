@@ -9,7 +9,7 @@ import pytest
 import soundfile as sf
 from fastapi.testclient import TestClient
 
-from backend.app import BackendSettings, Thresholds, _load_thresholds, create_app, verdict_for_score
+from backend.app import BackendSettings, Thresholds, _load_thresholds, _score_window, create_app, verdict_for_score
 
 
 class FixtureModel:
@@ -65,11 +65,11 @@ def test_health_has_model_and_thresholds() -> None:
     assert body["thresholds_placeholder"] is False
 
 
-def test_probability_threshold_file_matches_sigmoid_model_space(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_threshold_file_matches_raw_logit_model_space(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     model_path = tmp_path / "cnn_full" / "best.pt"
     model_path.parent.mkdir()
     (model_path.parent / "thresholds.json").write_text(
-        json.dumps({"uncertain_low": 0.123, "synthetic_high": 0.987}),
+        json.dumps({"uncertain_low": 1.123, "synthetic_high": 1.987}),
         encoding="utf-8",
     )
     monkeypatch.delenv("UNCERTAIN_LOW", raising=False)
@@ -77,8 +77,30 @@ def test_probability_threshold_file_matches_sigmoid_model_space(tmp_path: Path, 
     monkeypatch.delenv("THRESHOLDS_PATH", raising=False)
     thresholds = _load_thresholds(model_path)
     assert thresholds.placeholder is False
-    assert thresholds.uncertain_low == pytest.approx(0.123)
-    assert thresholds.synthetic_high == pytest.approx(0.987)
+    assert thresholds.uncertain_low == pytest.approx(1.123)
+    assert thresholds.synthetic_high == pytest.approx(1.987)
+
+
+def test_default_thresholds_are_raw_logit_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("UNCERTAIN_LOW", raising=False)
+    monkeypatch.delenv("SYNTHETIC_HIGH", raising=False)
+    monkeypatch.delenv("THRESHOLDS_PATH", raising=False)
+    thresholds = _load_thresholds(tmp_path / "best.pt")
+    assert thresholds.uncertain_low == pytest.approx(1.2186)
+    assert thresholds.synthetic_high == pytest.approx(1.2878)
+
+
+def test_backend_preserves_raw_logits() -> None:
+    class LogitModel:
+        model_version = "fixture"
+
+        def load(self) -> "LogitModel":
+            return self
+
+        def score(self, waveform_16k: np.ndarray) -> float:
+            return 2.5
+
+    assert _score_window(LogitModel(), np.zeros(16_000, dtype=np.float32)) == pytest.approx(2.5)
 
 
 def test_predict_returns_contract_and_original_format() -> None:
@@ -197,5 +219,5 @@ def test_cors_preflight_allows_frontend_and_ngrok_header() -> None:
             },
         )
     assert response.status_code == 200
-    assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
+    assert response.headers["access-control-allow-origin"] == "*"
     assert "ngrok-skip-browser-warning" in response.headers["access-control-allow-headers"].lower()

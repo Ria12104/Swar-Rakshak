@@ -25,15 +25,16 @@ class ScoringModel(Protocol):
 
     def score(self, waveform_16k: np.ndarray) -> float:
         """
-        Return a synthetic probability in [0, 1] for a 16 kHz waveform.
+        Return the mean synthetic logit for a 16 kHz waveform.
 
         A future WavLM adapter can implement this same interface without
         changing the API layer.
         """
+        ...
 
 
 class CNNScoringModel:
-    """Phase 2 CNN adapter that exposes probabilities instead of logits."""
+    """Phase 2 CNN adapter that exposes raw synthetic logits."""
 
     def __init__(self, checkpoint_path: str | Path, device: torch.device | None = None) -> None:
         self.checkpoint_path = Path(checkpoint_path)
@@ -54,5 +55,4 @@ class CNNScoringModel:
         batch = torch.from_numpy(np.stack(windows)).to(self.device)
         with torch.inference_mode():
             logits: Tensor = self.model(self.frontend(batch))
-            probability = torch.sigmoid(logits).mean().item()
-        return float(np.clip(probability, 0.0, 1.0))
+        return float(logits.mean().item())
