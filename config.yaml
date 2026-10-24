@@ -1,0 +1,3 @@
+# Fill these paths after extracting the datasets. Do not hard-code them elsewhere.
+asvspoof_la_root: "CHANGE_ME/asvspoof2019_la"
+itw_root: "CHANGE_ME/in_the_wild"
