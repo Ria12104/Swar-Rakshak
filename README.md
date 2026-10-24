@@ -77,3 +77,27 @@ python -m src.validate_manifests
 ```
 
 The builder requires exactly one `*cm.train*`, `*cm.dev*`, and `*cm.eval*` protocol file under `ASVspoof2019_LA_cm_protocols/`. It extracts duration/sample rate from `soundfile.info`, computes shared-preprocessing features with a multiprocessing `tqdm` pass, and stores a resumable `.feature_cache.csv` under `manifests/`.
+
+## Phase 3 backend
+
+The backend is a FastAPI app for the separately built Vite/React frontend. It loads one scoring adapter at startup and exposes `GET /health`, `POST /predict`, and `WS /stream`.
+
+Install the backend dependencies in the project virtual environment:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+Run it with a Kaggle-trained checkpoint:
+
+```bash
+MODEL_PATH=runs/smoke_500/best.pt python -m uvicorn backend.app:app --host 0.0.0.0 --port 8000
+```
+
+Optional environment variables are `UNCERTAIN_LOW`, `SYNTHETIC_HIGH`, `THRESHOLDS_PATH`, `EXTRA_ORIGINS`, `TRIM_SILENCE`, `MAX_UPLOAD_BYTES`, and `LOGS_DIR`. If thresholds are not supplied, the backend uses 0.40/0.70 placeholders and reports `thresholds_placeholder: true`.
+
+To verify the microphone contract without a browser:
+
+```bash
+python scripts/stream_client.py path/to/clip.wav --url ws://127.0.0.1:8000/stream
+```
